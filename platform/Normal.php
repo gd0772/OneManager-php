@@ -18,6 +18,20 @@ function getpath()
 
 function getGET()
 {
+    if (!$_POST) {
+        if (!!$HTTP_RAW_POST_DATA) {
+            $tmpdata = $HTTP_RAW_POST_DATA;
+        } else {
+            $tmpdata = file_get_contents('php://input');
+        }
+        if (!!$tmpdata) {
+            $postbody = explode("&", $tmpdata);
+            foreach ($postbody as $postvalues) {
+                $pos = strpos($postvalues,"=");
+                $_POST[urldecode(substr($postvalues,0,$pos))]=urldecode(substr($postvalues,$pos+1));
+            }
+        }
+    }
     if (isset($_SERVER['UNENCODED_URL'])) $_SERVER['REQUEST_URI'] = $_SERVER['UNENCODED_URL'];
     $p = strpos($_SERVER['REQUEST_URI'],'?');
     if ($p>0) {
@@ -44,23 +58,22 @@ function getGET()
 
 function getConfig($str, $disktag = '')
 {
-    global $InnerEnv;
-    global $Base64Env;
-    //include 'config.php';
-    $s = file_get_contents('.data/config.php');
-    //$configs = substr($s, 18, -2);
+    global $slash;
+    $projectPath = splitlast(__DIR__, $slash)[0];
+    $configPath = $projectPath . $slash . '.data' . $slash . 'config.php';
+    $s = file_get_contents($configPath);
     $configs = '{' . splitlast(splitfirst($s, '{')[1], '}')[0] . '}';
     if ($configs!='') {
         $envs = json_decode($configs, true);
-        if (in_array($str, $InnerEnv)) {
+        if (isInnerEnv($str)) {
             if ($disktag=='') $disktag = $_SERVER['disktag'];
             if (isset($envs[$disktag][$str])) {
-                if (in_array($str, $Base64Env)) return base64y_decode($envs[$disktag][$str]);
+                if (isBase64Env($str)) return base64y_decode($envs[$disktag][$str]);
                 else return $envs[$disktag][$str];
             }
         } else {
             if (isset($envs[$str])) {
-                if (in_array($str, $Base64Env)) return base64y_decode($envs[$str]);
+                if (isBase64Env($str)) return base64y_decode($envs[$str]);
                 else return $envs[$str];
             }
         }
@@ -70,20 +83,19 @@ function getConfig($str, $disktag = '')
 
 function setConfig($arr, $disktag = '')
 {
-    global $InnerEnv;
-    global $Base64Env;
+    global $slash;
     if ($disktag=='') $disktag = $_SERVER['disktag'];
-    //include 'config.php';
-    $s = file_get_contents('.data/config.php');
-    //$configs = substr($s, 18, -2);
+    $projectPath = splitlast(__DIR__, $slash)[0];
+    $configPath = $projectPath . $slash . '.data' . $slash . 'config.php';
+    $s = file_get_contents($configPath);
     $configs = '{' . splitlast(splitfirst($s, '{')[1], '}')[0] . '}';
     if ($configs!='') $envs = json_decode($configs, true);
-    $disktags = explode("|",getConfig('disktag'));
+    $disktags = explode("|", getConfig('disktag'));
     $indisk = 0;
     $operatedisk = 0;
     foreach ($arr as $k => $v) {
-        if (in_array($k, $InnerEnv)) {
-            if (in_array($k, $Base64Env)) $envs[$disktag][$k] = base64y_encode($v);
+        if (isInnerEnv($k)) {
+            if (isBase64Env($k)) $envs[$disktag][$k] = base64y_encode($v);
             else $envs[$disktag][$k] = $v;
             $indisk = 1;
         } elseif ($k=='disktag_add') {
@@ -93,8 +105,15 @@ function setConfig($arr, $disktag = '')
             $disktags = array_diff($disktags, [ $v ]);
             $envs[$v] = '';
             $operatedisk = 1;
+        } elseif ($k=='disktag_copy') {
+            $newtag = $v . '_' . date("Ymd_His");
+            $envs[$newtag] = $envs[$v];
+            array_push($disktags, $newtag);
+            $operatedisk = 1;
+        } elseif ($k=='disktag_rename' || $k=='disktag_newname') {
+            if ($arr['disktag_rename']!=$arr['disktag_newname']) $operatedisk = 1;
         } else {
-            if (in_array($k, $Base64Env)) $envs[$k] = base64y_encode($v);
+            if (isBase64Env($k)) $envs[$k] = base64y_encode($v);
             else $envs[$k] = $v;
         }
     }
@@ -105,17 +124,30 @@ function setConfig($arr, $disktag = '')
         $envs[$disktag] = $diskconfig;
     }
     if ($operatedisk) {
-        $disktags = array_unique($disktags);
-        foreach ($disktags as $disktag) if ($disktag!='') $disktag_s .= $disktag . '|';
-        if ($disktag_s!='') $envs['disktag'] = substr($disktag_s, 0, -1);
-        else $envs['disktag'] = '';
+        if (isset($arr['disktag_newname']) && $arr['disktag_newname']!='') {
+            $tags = [];
+            foreach ($disktags as $tag) {
+                if ($tag==$arr['disktag_rename']) array_push($tags, $arr['disktag_newname']);
+                else array_push($tags, $tag);
+            }
+            $envs['disktag'] = implode('|', $tags);
+            $envs[$arr['disktag_newname']] = $envs[$arr['disktag_rename']];
+            unset($envs[$arr['disktag_rename']]);
+        } else {
+            $disktags = array_unique($disktags);
+            foreach ($disktags as $disktag) if ($disktag!='') $disktag_s .= $disktag . '|';
+            if ($disktag_s!='') $envs['disktag'] = substr($disktag_s, 0, -1);
+            else $envs['disktag'] = '';
+        }
     }
     $envs = array_filter($envs, 'array_value_isnot_null');
-    ksort($envs);
+    //ksort($envs);
+    sortConfig($envs);
+    
     //echo '<pre>'. json_encode($envs, JSON_PRETTY_PRINT).'</pre>';
     $prestr = '<?php $configs = \'' . PHP_EOL;
     $aftstr = PHP_EOL . '\';';
-    $response = file_put_contents('.data/config.php', $prestr . json_encode($envs, JSON_PRETTY_PRINT) . $aftstr);
+    $response = file_put_contents($configPath, $prestr . json_encode($envs, JSON_PRETTY_PRINT) . $aftstr);
     if ($response>0) return json_encode( [ 'response' => 'success' ] );
     return json_encode( [ 'message' => 'Failed to write config.', 'code' => 'failed' ] );
 }
@@ -184,7 +216,7 @@ function install()
             //if (location.port!="") url += ":" + location.port;
             url += location.pathname;
             if (url.substr(-1)!="/") url += "/";
-            url += ".data/config.php";
+            url += "app.json";
             //alert(url);
             var xhr4 = new XMLHttpRequest();
             xhr4.open("GET", url);
@@ -230,7 +262,7 @@ language:<br>';
         return message($html, $title, 201);
     }
     $html .= '<a href="?install0">'.getconstStr('ClickInstall').'</a>, '.getconstStr('LogintoBind');
-    $title = 'Error';
+    $title = 'Install';
     return message($html, $title, 201);
 }
 
@@ -242,17 +274,6 @@ function ConfigWriteable()
     setConfig([ 'tmp' => '' ]);
     if ($tmp == $t) return true;
     if ($r) return true;
-    return false;
-}
-
-function RewriteEngineOn()
-{
-    $http_type = ((isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] == 'on') || (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] == 'https')) ? 'https://' : 'http://';
-    $tmpurl = $http_type . $_SERVER['SERVER_NAME'].':'.$_SERVER['SERVER_PORT'];
-    $tmpurl .= path_format($_SERVER['base_path'] . '/.data/config.php');
-    $tmp = curl_request($tmpurl);
-    if ($tmp['stat']==200) return false;
-    if ($tmp['stat']==201) return true; //when install return 201, after installed return 404 or 200;
     return false;
 }
 
@@ -305,7 +326,7 @@ function OnekeyUpate($auth = 'qkqpttgf', $project = 'OneManager-php', $branch = 
             break;
         }
     }
-    //error_log($outPath);
+    //error_log1($outPath);
     if ($outPath=='') return 0;
 
     //unlink($outPath.'/config.php');
